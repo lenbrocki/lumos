@@ -13,9 +13,33 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+
+      # Build with the SAME Xcode/Swift toolchain used locally. The default runner
+      # toolchain (Xcode 15 / Swift 5.10 on macos-14) compiles Lumos's async screen-capture
+      # path to a measurably higher idle-CPU binary than a local Xcode 26 / Swift 6.2 build
+      # of the identical source. Pinning the toolchain makes the released .dmg match what
+      # you build locally. If the runner doesn't have 26.2, this step errors and lists the
+      # available versions — bump the runner image (e.g. macos-26) or the version here.
+      - name: Select Xcode (match local toolchain)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.2"
+
+      - name: Verify toolchain matches local (Swift >= 6.2)
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          SWIFT_VER="$(swift -version 2>&1 | sed -nE 's/.*Apple Swift version ([0-9]+\.[0-9]+).*/\1/p' | head -1)"
+          echo "Detected Swift $SWIFT_VER"
+          MIN="6.2"
+          if [ "$(printf '%s\n%s\n' "$MIN" "$SWIFT_VER" | sort -V | head -1)" != "$MIN" ]; then
+            echo "::error::Swift $SWIFT_VER is older than $MIN; the build would not match local. Aborting."
+            exit 1
+          fi
 
       - name: Import Developer ID signing certificate
         env:

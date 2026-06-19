@@ -13,6 +13,8 @@ display *and* every external monitor.
 
 **Apple Silicon · macOS 14+ · lives in the menu bar**
 
+[![GitHub downloads](https://img.shields.io/github/downloads/lenbrocki/lumos/total?label=downloads&color=blue)](../../releases)
+
 <br>
 
 <img src="assets/lumos_readme.gif" alt="Lumos adapting screen brightness to on-screen content" width="720">

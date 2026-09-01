@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -48,6 +49,8 @@ struct ContentView: View {
             }
 
             Divider()
+            LaunchAtLoginToggle()
+
             Button("Quit Lumos") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
         }
@@ -57,6 +60,40 @@ struct ContentView: View {
         .onDisappear { state.popoverDisappeared() }
     }
 
+}
+
+/// Login item toggle. `SMAppService` owns the state, so nothing is persisted here — the
+/// registration itself is the source of truth.
+struct LaunchAtLoginToggle: View {
+    @State private var isOn = SMAppService.mainApp.status == .enabled
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Launch at login", isOn: Binding(get: { isOn }, set: setEnabled))
+                .toggleStyle(.switch)
+
+            if let error {
+                Text(error).font(.caption2).foregroundStyle(.red)
+            }
+        }
+        // ponytail: re-read on appear only; no SMAppService change notification exists.
+        .onAppear { isOn = SMAppService.mainApp.status == .enabled }
+    }
+
+    private func setEnabled(_ on: Bool) {
+        do {
+            if on {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        isOn = SMAppService.mainApp.status == .enabled
+    }
 }
 
 /// Per-app pause (ignore list): turn auto-brightness off for the current app, and manage the

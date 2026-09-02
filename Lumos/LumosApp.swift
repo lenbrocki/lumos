@@ -51,6 +51,7 @@ struct ContentView: View {
             Divider()
             LaunchAtLoginToggle()
 
+            Divider()
             Button("Quit Lumos") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
         }
@@ -65,8 +66,12 @@ struct ContentView: View {
 /// Login item toggle. `SMAppService` owns the state, so nothing is persisted here — the
 /// registration itself is the source of truth.
 struct LaunchAtLoginToggle: View {
-    @State private var isOn = SMAppService.mainApp.status == .enabled
+    // Deliberately not seeded from `SMAppService.mainApp.status`: this view is rebuilt on every
+    // flush while the popover is open (~5/s), and that status call is a blocking system query
+    // whose result SwiftUI would throw away after the first one. `onAppear` reads it instead.
+    @State private var isOn = false
     @State private var error: String?
+    @State private var needsSettings = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -76,23 +81,57 @@ struct LaunchAtLoginToggle: View {
             if let error {
                 Text(error).font(.caption2).foregroundStyle(.red)
             }
+
+            if needsSettings {
+                Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+            }
         }
-        // ponytail: re-read on appear only; no SMAppService change notification exists.
-        .onAppear { isOn = SMAppService.mainApp.status == .enabled }
+        .onAppear { refreshFromSystem() }
+    }
+
+    /// Re-read on appear only; there's no SMAppService change notification to observe. This also
+    /// covers the user flipping Lumos off in System Settings while the app is running.
+    private func refreshFromSystem() {
+        let status = SMAppService.mainApp.status
+        isOn = status == .enabled
+
+        if status == .requiresApproval {
+            error = "Lumos needs to be approved in Login Items."
+            needsSettings = true
+        } else {
+            error = nil
+            needsSettings = false
+        }
     }
 
     private func setEnabled(_ on: Bool) {
+        var failure: String?
         do {
             if on {
                 try SMAppService.mainApp.register()
             } else {
                 try SMAppService.mainApp.unregister()
             }
-            error = nil
         } catch {
-            self.error = error.localizedDescription
+            // These localize to bare domain codes ("SMAppServiceErrorDomain error 1"), which
+            // tells the user nothing — say what failed and point at System Settings instead.
+            failure = on ? "Couldn't turn on launch at login." : "Couldn't turn off launch at login."
         }
-        isOn = SMAppService.mainApp.status == .enabled
+
+        refreshFromSystem()
+
+        // `register()` can return without throwing while the system still leaves the item off,
+        // so trust `status` over what was asked for and never show an unexplained snap-back.
+        if failure == nil, isOn != on {
+            failure = "macOS didn't accept the change."
+        }
+        // A `requiresApproval` message from refreshFromSystem() is more specific; keep it.
+        if let failure, error == nil {
+            error = failure
+            needsSettings = true
+        }
     }
 }
 

@@ -35,6 +35,8 @@ display *and* every external monitor.
 - **🖥️ Built-in *and* external monitors** — controls your MacBook panel and external displays
   over DDC/CI, each adapted to its own content and with its own learned memory. Plug or unplug a
   monitor and it adjusts automatically.
+- **🚀 Launch at login** — flip one switch in the menu and Lumos is running from the moment you
+  log in. No trip to System Settings.
 - **🔒 Private** — everything happens locally on your Mac; nothing is sent anywhere.
 
 ## Install

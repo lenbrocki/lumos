@@ -63,12 +63,25 @@ struct ContentView: View {
 
 }
 
-/// Login item toggle. `SMAppService` owns the state, so nothing is persisted here — the
+/// Login-item registration. `SMAppService` owns the state, so nothing is persisted here — the
 /// registration itself is the source of truth.
+enum LaunchAtLogin {
+    static var status: SMAppService.Status { SMAppService.mainApp.status }
+    static var isEnabled: Bool { status == .enabled }
+
+    static func setEnabled(_ on: Bool) throws {
+        if on {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+    }
+}
+
 struct LaunchAtLoginToggle: View {
-    // Deliberately not seeded from `SMAppService.mainApp.status`: this view is rebuilt on every
-    // flush while the popover is open (~5/s), and that status call is a blocking system query
-    // whose result SwiftUI would throw away after the first one. `onAppear` reads it instead.
+    // Deliberately not seeded from `LaunchAtLogin.status`: this view is rebuilt on every flush
+    // while the popover is open (~5/s), and that status call is a blocking system query whose
+    // result SwiftUI would throw away after the first one. `onAppear` reads it instead.
     @State private var isOn = false
     @State private var error: String?
     @State private var needsSettings = false
@@ -94,7 +107,7 @@ struct LaunchAtLoginToggle: View {
     /// Re-read on appear only; there's no SMAppService change notification to observe. This also
     /// covers the user flipping Lumos off in System Settings while the app is running.
     private func refreshFromSystem() {
-        let status = SMAppService.mainApp.status
+        let status = LaunchAtLogin.status
         isOn = status == .enabled
 
         if status == .requiresApproval {
@@ -109,11 +122,7 @@ struct LaunchAtLoginToggle: View {
     private func setEnabled(_ on: Bool) {
         var failure: String?
         do {
-            if on {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
-            }
+            try LaunchAtLogin.setEnabled(on)
         } catch {
             // These localize to bare domain codes ("SMAppServiceErrorDomain error 1"), which
             // tells the user nothing — say what failed and point at System Settings instead.

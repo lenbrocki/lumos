@@ -75,6 +75,21 @@ final class AppState: ObservableObject {
             self?.lastErrorMessage = error.localizedDescription
         }
         coordinator.onIgnoreStateChanged = { [weak self] in self?.refreshIgnoreState() }
+
+        activateIfLaunchedAtLogin()
+    }
+
+    /// Auto-brightness is a per-session switch: it always starts off. That's fine when you open
+    /// Lumos by hand, but someone who turned on "Launch at login" wants it *adapting* at login,
+    /// not a menu bar icon sitting idle until they notice. So follow the login item.
+    private func activateIfLaunchedAtLogin() {
+        guard LaunchAtLogin.isEnabled else { return }
+        // `setEnabled(true)` asks for Screen Recording when it's missing. At login there is no
+        // user action behind that panel, so only start when access is already granted and let
+        // the menu toggle do the asking otherwise.
+        guard hasScreenPermission else { return }
+
+        setEnabled(true)
     }
 
     func setEnabled(_ on: Bool) {

@@ -148,6 +148,34 @@ struct LaunchAtLoginToggle: View {
 /// list of paused apps. A paused app holds whatever brightness you last set while in it.
 struct PauseSection: View {
     @ObservedObject var state: AppState
+    @State private var query = ""
+    @State private var showAll = false
+
+    /// Paused apps collapse to this many rows, with a "Show more" toggle for the rest.
+    private let collapsedLimit = 3
+
+    /// Paused apps other than the current one (which is shown above with its toggle).
+    private var otherPaused: [AppState.IgnoredAppVM] {
+        state.ignoredApps.filter { $0.id != state.currentApp?.bundleID }
+    }
+
+    private var searchResults: [AppCandidate] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return [] }
+        let paused = Set(state.ignoredApps.map(\.id))
+        let matches = state.appCatalog.filter {
+            !paused.contains($0.bundleID) && $0.name.localizedCaseInsensitiveContains(q)
+        }
+        // Names starting with the query first, then other matches; list is already name-sorted.
+        let prefixed = matches.filter { $0.name.lowercased().hasPrefix(q.lowercased()) }
+        let rest = matches.filter { !$0.name.lowercased().hasPrefix(q.lowercased()) }
+        return Array((prefixed + rest).prefix(5))
+    }
+
+    private func add(_ app: AppCandidate) {
+        state.addIgnoredApp(app)
+        query = ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -168,7 +196,9 @@ struct PauseSection: View {
             }
 
             // Other paused apps (the current one is already shown above with its toggle).
-            ForEach(state.ignoredApps.filter { $0.id != state.currentApp?.bundleID }) { app in
+            let others = otherPaused
+            let collapsible = others.count > collapsedLimit
+            ForEach(collapsible && !showAll ? Array(others.prefix(collapsedLimit)) : others) { app in
                 HStack(spacing: 6) {
                     Image(systemName: "pause.circle").foregroundStyle(.secondary)
                     Text(app.name).lineLimit(1)
@@ -184,7 +214,55 @@ struct PauseSection: View {
                 }
                 .font(.caption)
             }
+
+            if collapsible {
+                Button(showAll ? "Show less" : "Show \(others.count - collapsedLimit) more") {
+                    showAll.toggle()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+
+            // Search installed apps to pause one without switching to it.
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Add an app to pause…", text: $query)
+                    .textFieldStyle(.plain)
+                    .onSubmit { if let first = searchResults.first { add(first) } }
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+
+            let results = searchResults
+            if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                if results.isEmpty {
+                    Text(state.appCatalog.isEmpty ? "Loading apps…" : "No matching apps")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    ForEach(results) { app in
+                        Button { add(app) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle").foregroundStyle(.secondary)
+                                Text(app.name).lineLimit(1)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .help("Pause auto-brightness while \(app.name) is frontmost")
+                    }
+                }
+            }
         }
+        .onAppear { state.loadAppCatalog() }
     }
 }
 

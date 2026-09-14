@@ -92,6 +92,13 @@ final class DisplayCoordinator {
         onIgnoreStateChanged?()
     }
 
+    /// Pauses an app picked by search (it doesn't have to be, or have been, frontmost).
+    func addIgnored(bundleID: String, name: String) {
+        ignoreStore.add(bundleID: bundleID, name: name)
+        applyIgnoreState()
+        onIgnoreStateChanged?()
+    }
+
     func removeIgnored(bundleID: String) {
         ignoreStore.remove(bundleID: bundleID)
         applyIgnoreState()
@@ -162,19 +169,21 @@ final class DisplayCoordinator {
     private func currentControllableDisplays() -> [(info: DisplayInfo, backend: BrightnessBackend)] {
         var result: [(DisplayInfo, BrightnessBackend)] = []
 
-        // Built-in panel.
-        let builtInID = BrightnessController.builtInDisplayID()
-        let builtIn = BuiltInBrightnessBackend(displayID: builtInID)
-        if builtIn.isAvailable {
-            let info = DisplayInfo(displayID: builtInID,
-                                   name: "Built-in Display",
-                                   isBuiltIn: true,
-                                   persistKey: persistKey(for: builtInID, fallback: "builtin"))
-            result.append((info, builtIn))
+        // Built-in panel — only when it's actually active (not with the lid closed).
+        if let builtInID = BrightnessController.activeBuiltInDisplayID() {
+            let builtIn = BuiltInBrightnessBackend(displayID: builtInID)
+            if builtIn.isAvailable {
+                let info = DisplayInfo(displayID: builtInID,
+                                       name: "Built-in Display",
+                                       isBuiltIn: true,
+                                       persistKey: persistKey(for: builtInID, fallback: "builtin"))
+                result.append((info, builtIn))
+            }
         }
 
-        // DDC-controllable externals.
-        for ext in externalManager.detect() {
+        // DDC-controllable externals. Display IDs must be unique: engines and the menu's
+        // ForEach are keyed by them, and a duplicate renders one display twice.
+        for ext in externalManager.detect() where !result.contains(where: { $0.0.displayID == ext.displayID }) {
             let info = DisplayInfo(displayID: ext.displayID,
                                    name: ext.name,
                                    isBuiltIn: false,

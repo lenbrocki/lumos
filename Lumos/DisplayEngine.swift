@@ -9,7 +9,8 @@ import QuartzCore
 ///
 /// Corrections:
 /// - Built-in (backend supports readback): a poll detects brightness-key / Control-Center changes.
-/// - External (no reliable readback): the in-app slider calls `commitUserBrightness`.
+/// - External (DDC): the in-app slider calls `commitUserBrightness`, and a background DDC poll
+///   picks up changes made elsewhere (MonitorControl, the monitor's own buttons).
 /// Both feed the same learning (`reinforce`) on this display's own curve.
 final class DisplayEngine {
     let info: DisplayInfo
@@ -26,6 +27,10 @@ final class DisplayEngine {
     // Learning tuning.
     var overrideThreshold: Double = 0.04
     var overrideSettleTime: CFTimeInterval = 0.4
+    /// Settle time for changes seen by the background (DDC) poll. Longer than the built-in's:
+    /// shortcut taps arrive as separate steps with gaps, and the slider already reflects each
+    /// step immediately, so only learn once the level has clearly stopped moving.
+    var backgroundOverrideSettleTime: CFTimeInterval = 1.5
 
     var onUpdate: ((Double, Double) -> Void)?
     var onError: ((Error) -> Void)?
@@ -53,6 +58,17 @@ final class DisplayEngine {
     private var pendingOverrideSince: CFTimeInterval = 0
     private var overrideDebounce: DispatchWorkItem?  // notification path: settle before committing
     private var isUserEditing = false
+
+    // Background readback (slow backends, i.e. DDC). A read is skipped while our own writes are
+    // recent — the monitor may still report the previous level — and ignored if a write raced it.
+    // Readback is only trusted once the monitor has reported a level Lumos itself set, so a
+    // monitor that returns a stale/constant value can't masquerade as a user change.
+    private let readbackQueue = DispatchQueue(label: "Lumos.readback", qos: .utility)
+    private var readbackGraceTime: CFTimeInterval = 1.0
+    private var lastWriteTime: CFTimeInterval = 0
+    private var hasWritten = false
+    private var readbackVerified = false
+    private var backgroundReadInFlight = false
 
     // Per-app pause (ignore list). While `ignoredMode` is on, content-adaptive adjustment is
     // suspended and the display holds the app's remembered level; manual changes update that
@@ -104,6 +120,8 @@ final class DisplayEngine {
                 self?.handleBrightnessChangeNotification()
             }
             if !observing { startMonitor() }
+        } else if let interval = backend.backgroundPollInterval {
+            startBackgroundMonitor(interval: interval)
         }
 
         launchCapture()
@@ -240,7 +258,7 @@ final class DisplayEngine {
         let v = max(0, min(1, value))
         currentBrightness = v
         targetBrightness = v
-        backend.write(v)
+        writeHardware(v)
         onUpdate?(latestLuminance, v)
     }
 
@@ -249,7 +267,7 @@ final class DisplayEngine {
         let v = max(0, min(1, value))
         currentBrightness = v
         targetBrightness = v
-        backend.write(v)
+        writeHardware(v)
         isUserEditing = false
         if ignoredMode {
             // Paused for an app: remember this as the app's preferred level, don't reshape the curve.
@@ -311,7 +329,7 @@ final class DisplayEngine {
                 currentBrightness = abs(diff) <= step
                     ? targetBrightness
                     : currentBrightness + (diff > 0 ? step : -step)
-                backend.write(currentBrightness)
+                writeHardware(currentBrightness)
             }
         }
         onUpdate?(latestLuminance, currentBrightness)
@@ -347,7 +365,7 @@ final class DisplayEngine {
     /// debounce in flight) — auto-adjust pauses so we don't fight them.
     private var isUserAdjustingBrightness: Bool { pendingOverride != nil || overrideDebounce != nil }
 
-    // MARK: - Override detection (built-in only)
+    // MARK: - Override detection
 
     /// Event-driven override detection. DisplayServices calls this (on the main thread) for
     /// every hardware brightness change — including our own ramp writes, which the
@@ -378,22 +396,76 @@ final class DisplayEngine {
         monitorTimer = timer
     }
 
+    private func writeHardware(_ value: Double) {
+        backend.write(value)
+        lastWriteTime = CACurrentMediaTime()
+        hasWritten = true
+    }
+
     private func monitorTick() {
         guard !isActivelyRamping, !isUserEditing else { return }
         guard let hw = backend.read() else { return }
+        evaluateReadback(hw, settleTime: overrideSettleTime)
+    }
+
+    private func startBackgroundMonitor(interval: TimeInterval) {
+        guard monitorTimer == nil else { return }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.backgroundMonitorTick()
+        }
+        timer.tolerance = interval * 0.2
+        RunLoop.main.add(timer, forMode: .common)
+        monitorTimer = timer
+    }
+
+    /// Same override detection as `monitorTick`, but the (blocking) read runs off the main thread.
+    private func backgroundMonitorTick() {
+        let startedAt = CACurrentMediaTime()
+        guard !backgroundReadInFlight, !isActivelyRamping, !isUserEditing,
+              startedAt - lastWriteTime >= readbackGraceTime else { return }
+        backgroundReadInFlight = true
+        readbackQueue.async { [weak self, backend] in
+            let hw = backend.read()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.backgroundReadInFlight = false
+                guard self.isRunning, let hw, !self.isActivelyRamping, !self.isUserEditing,
+                      self.lastWriteTime < startedAt else { return }
+                if !self.readbackVerified {
+                    if self.hasWritten, abs(hw - self.currentBrightness) <= 0.02 {
+                        self.readbackVerified = true
+                    }
+                    return
+                }
+                self.evaluateReadback(hw, settleTime: self.backgroundOverrideSettleTime)
+            }
+        }
+    }
+
+    private func evaluateReadback(_ hw: Double, settleTime: CFTimeInterval) {
         let now = CACurrentMediaTime()
 
         if let pending = pendingOverride {
             if abs(hw - pending) > 0.005 {
                 pendingOverride = hw
                 pendingOverrideSince = now
-            } else if now - pendingOverrideSince >= overrideSettleTime {
+                reflectPendingOverride(hw)
+            } else if now - pendingOverrideSince >= settleTime {
                 commitOverride(brightness: hw)
             }
         } else if abs(hw - currentBrightness) > overrideThreshold {
             pendingOverride = hw
             pendingOverrideSince = now
+            reflectPendingOverride(hw)
         }
+    }
+
+    /// Shows an outside change right away instead of waiting for it to settle; learning still
+    /// waits for `commitOverride`. Safe because the control loop is parked while an override is
+    /// pending, so nothing writes `currentBrightness` back to the hardware meanwhile.
+    private func reflectPendingOverride(_ hw: Double) {
+        currentBrightness = hw
+        onUpdate?(latestLuminance, hw)
     }
 
     private func commitOverride(brightness hw: Double) {

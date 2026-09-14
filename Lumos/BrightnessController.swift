@@ -111,14 +111,16 @@ final class BrightnessController {
 
     /// Finds the built-in panel; falls back to the main display.
     static func builtInDisplayID() -> CGDirectDisplayID {
+        activeBuiltInDisplayID() ?? CGMainDisplayID()
+    }
+
+    /// The built-in panel's ID if it is currently active, else nil (e.g. lid closed in clamshell
+    /// mode, where the main display is an external and must not be mistaken for the built-in).
+    static func activeBuiltInDisplayID() -> CGDirectDisplayID? {
         var count: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
-            return CGMainDisplayID()
-        }
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetActiveDisplayList(count, &displays, &count) == .success else {
-            return CGMainDisplayID()
-        }
-        return displays.first(where: { CGDisplayIsBuiltin($0) != 0 }) ?? CGMainDisplayID()
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return nil }
+        return displays.prefix(Int(count)).first(where: { CGDisplayIsBuiltin($0) != 0 })
     }
 }

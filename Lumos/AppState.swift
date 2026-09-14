@@ -127,6 +127,26 @@ final class AppState: ObservableObject {
         coordinator.removeIgnored(bundleID: bundleID)
     }
 
+    func addIgnoredApp(_ app: AppCandidate) {
+        coordinator.addIgnored(bundleID: app.bundleID, name: app.name)
+    }
+
+    /// Apps offered by the pause search. Empty until `loadAppCatalog()` finishes.
+    @Published private(set) var appCatalog: [AppCandidate] = []
+    private var catalogLoading = false
+
+    /// Scans installed apps in the background. Re-scans on each call (cheap, and picks up apps
+    /// installed since last time); overlapping calls are dropped.
+    func loadAppCatalog() {
+        guard !catalogLoading else { return }
+        catalogLoading = true
+        Task { [weak self] in
+            let apps = await Task.detached(priority: .userInitiated) { AppCatalog.load() }.value
+            self?.appCatalog = apps
+            self?.catalogLoading = false
+        }
+    }
+
     private func refreshIgnoreState(force: Bool = false) {
         guard force || popoverVisible else { return }
         ignoredApps = coordinator.ignoredApps.map { IgnoredAppVM(id: $0.bundleID, name: $0.name) }

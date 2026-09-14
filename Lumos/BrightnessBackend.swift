@@ -11,6 +11,11 @@ protocol BrightnessBackend: AnyObject {
     func read() -> Double?
     func write(_ value: Double)
 
+    /// For backends whose `read()` is slow (blocking I/O) and has no change notifications: how
+    /// often the engine should poll it off the main thread to catch changes made outside Lumos
+    /// (another app, the monitor's own buttons). nil = don't background-poll.
+    var backgroundPollInterval: TimeInterval? { get }
+
     /// Subscribe to hardware brightness changes (event-driven; the handler runs on the main
     /// thread). Returns false if change notifications aren't supported, in which case the
     /// engine falls back to polling `read()`.
@@ -28,6 +33,7 @@ final class BuiltInBrightnessBackend: BrightnessBackend {
 
     var isAvailable: Bool { controller.isAvailable }
     var supportsReadback: Bool { true }
+    var backgroundPollInterval: TimeInterval? { nil }
     func read() -> Double? { controller.getBrightness().map(Double.init) }
     func write(_ value: Double) { controller.setBrightness(Float(value)) }
 
@@ -38,11 +44,16 @@ final class BuiltInBrightnessBackend: BrightnessBackend {
 }
 
 /// External monitor via DDC/CI (VCP `0x10` = luminance), using the vendored `Arm64DDC`.
-/// Readback is attempted but treated as unreliable; the engine relies on the in-app slider
-/// for corrections rather than polling these monitors.
+/// Readback is slow (blocking I2C) and not trusted on every monitor, so it isn't used for the
+/// main-thread readback path; instead the engine polls it in the background and only acts on it
+/// once the monitor has shown that it reports back what Lumos wrote.
 final class DDCBrightnessBackend: BrightnessBackend {
     private let service: IOAVService?
     private let maxValue: UInt16
+    private let canRead: Bool
+    /// Serializes I2C transactions: writes come from the main thread, polled reads from a
+    /// background queue, and interleaving them on one service garbles both.
+    private let ioLock = NSLock()
     private(set) var lastWritten: Double
 
     init?(match: Arm64DDC.Arm64Service) {
@@ -53,16 +64,22 @@ final class DDCBrightnessBackend: BrightnessBackend {
         maxValue = (probe?.max ?? 0) > 0 ? probe!.max : 100
         if let p = probe, p.max > 0 {
             lastWritten = Double(p.current) / Double(p.max)
+            canRead = p.current <= p.max
         } else {
             lastWritten = 1.0
+            canRead = false
         }
     }
 
     var isAvailable: Bool { service != nil }
     var supportsReadback: Bool { false }
+    // A read is ~70 ms of I2C on a background queue, so this is cheap; shorter feels instant.
+    var backgroundPollInterval: TimeInterval? { canRead ? 0.5 : nil }
 
     func read() -> Double? {
-        guard let r = Arm64DDC.read(service: service, command: 0x10), r.max > 0 else { return nil }
+        ioLock.lock(); defer { ioLock.unlock() }
+        guard let r = Arm64DDC.read(service: service, command: 0x10), r.max > 0, r.current <= r.max
+        else { return nil }
         return Double(r.current) / Double(r.max)
     }
 
@@ -70,10 +87,11 @@ final class DDCBrightnessBackend: BrightnessBackend {
         let clamped = max(0, min(1, value))
         lastWritten = clamped
         let raw = UInt16((Double(maxValue) * clamped).rounded())
+        ioLock.lock(); defer { ioLock.unlock() }
         _ = Arm64DDC.write(service: service, command: 0x10, value: raw)
     }
 
-    // DDC monitors have no change-notification path; the engine relies on the in-app slider.
+    // DDC monitors have no change-notification path; the engine polls via `backgroundPollInterval`.
     func observeBrightnessChanges(_ handler: @escaping () -> Void) -> Bool { false }
     func stopObservingBrightnessChanges() {}
 }

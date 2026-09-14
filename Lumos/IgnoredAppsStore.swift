@@ -1,4 +1,54 @@
+import AppKit
 import Foundation
+
+/// An installed or running application that can be added to the pause list by search.
+struct AppCandidate: Identifiable, Hashable {
+    let bundleID: String
+    let name: String
+    var id: String { bundleID }
+}
+
+/// Finds applications to offer in the "add paused app" search: installed bundles in the standard
+/// Applications folders plus anything currently running (covers apps launched from elsewhere).
+enum AppCatalog {
+    /// Scans the filesystem, so call it off the main thread. Sorted by name, one entry per bundle ID.
+    static func load() -> [AppCandidate] {
+        let fm = FileManager.default
+        var roots = ["/Applications", "/System/Applications", "/System/Applications/Utilities",
+                     "/Applications/Utilities"].map { URL(fileURLWithPath: $0) }
+        roots.append(fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications"))
+
+        var byID: [String: AppCandidate] = [:]
+        func add(_ bundleID: String?, _ name: String?) {
+            guard let bundleID, let name, !name.isEmpty,
+                  bundleID != Bundle.main.bundleIdentifier, byID[bundleID] == nil else { return }
+            byID[bundleID] = AppCandidate(bundleID: bundleID, name: name)
+        }
+
+        for root in roots {
+            guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil,
+                                                          options: [.skipsHiddenFiles]) else { continue }
+            // Apps sit at the top level or one folder down (e.g. "/Applications/Adobe Photoshop/").
+            var appURLs = items.filter { $0.pathExtension == "app" }
+            for dir in items where dir.pathExtension.isEmpty {
+                let nested = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
+                                                          options: [.skipsHiddenFiles])) ?? []
+                appURLs += nested.filter { $0.pathExtension == "app" }
+            }
+            for url in appURLs {
+                let bundle = Bundle(url: url)
+                add(bundle?.bundleIdentifier, fm.displayName(atPath: url.path)
+                    .replacingOccurrences(of: ".app", with: ""))
+            }
+        }
+
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            add(app.bundleIdentifier, app.localizedName)
+        }
+
+        return byID.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
 
 /// One application for which auto-brightness is paused, plus the backlight level it should
 /// hold — remembered per display so each panel keeps its own preferred level for the app.
